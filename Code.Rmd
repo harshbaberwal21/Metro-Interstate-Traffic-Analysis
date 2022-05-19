@@ -1,0 +1,349 @@
+---
+title: "STAT429 Time Series Proj"
+author: "Group 4"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(xts)
+library(astsa)
+library(mltools)
+library(lubridate)
+library(data.table)
+library(tseries)
+library(forecast)
+library(fpp2)
+library(zoo)
+library(imputeTS)
+```
+
+# Part A
+
+We have chosen the Metro Interstate traffic volume data available at the [UCI machine learning repository](https://archive.ics.uci.edu/ml/datasets/Metro+Interstate+Traffic+Volume). The data contains Hourly Interstate 94 Westbound traffic volume for MN DoT ATR station 301, roughly midway between Minneapolis and St Paul, MN. Hourly weather features and holidays are also included for impacts on traffic volume.
+
+Description about Dependent variable:
+Traffic volume : This is westbound traffic volume on I-94 roughly midway
+between Minneapolis and St Paul, MN
+
+Description about Predictors:
+date : Date 
+holiday : This includes all US National Holidays (including regional holiday like Minnesota State Fair)
+temp : Average Temperature in Kelvin
+rain_1h : Amount of rain(mm) that occured in the hour 
+snow_1h : Amount of snow(mm) that occured in the hour 
+clouds_all : Percentage of cloud cover
+weather_main_Clear : if weather is clear (1) or not (0)
+weather_main_Clouds : if clouds are present(1) or not (0)
+weather_main_Drizzle : if it is drizzling(1) or not (0)
+weather_main_Fog : if there is Fog (1) or not (0)
+weather_main_Haze : if there is Haze (1) or not (0)
+weather_main_Mist : if there is Mist (1) or not (0)
+weather_main_Rain: if it is Raining (1) or not (0)
+weather_main_Smoke : if there is Smoke (1) or not (0)
+weather_main_Snow : is it is snowing (1) or not (0)
+weather_main_Thunderstorm : if there is a thunderstorm (1) or not (0)
+
+The predictors were chosen on basis of possible correlations with the dependent variable i.e. traffic volume data. These predictors such as rain, snow, temperature, etc. were suspected to affect the metro state traffic volume. Along with these, a dummy variable for indicating holidays is included along with date as a predictor.
+
+For this project, we choose data after 2014 and filter data corresponding to 20:00 hour of each day. This enables us to be consistent with our analysis. We have also removed a few outliers which are present in the data.
+
+```{r, Initial}
+df <- read.csv('Metro_Interstate_Traffic_Volume.csv')
+
+df$date_time_c = strptime(df$date_time, format = "%Y-%m-%d %H:%M:%S")
+
+df = df %>% mutate(dt_year = as.integer(format(date_time_c, "%Y")),
+                   dt_month = as.integer(format(date_time_c, "%m")),
+                   dt_day = as.integer(format(date_time_c, "%d")),
+                   dt_hour = as.integer(format(date_time_c, "%H")))
+
+df <- df %>% mutate(date = make_date(dt_year, dt_month, dt_day))
+ff <- df %>%  mutate(h = if_else(holiday == 'None', 0, 1))%>%
+  filter(h == 1)%>% select(c("date", "h"))
+
+df <- df  %>% left_join(ff, by = "date") %>% 
+  mutate(holiday = if_else(is.na(h), 0, 1)) %>% select(-c("h", "date"))
+
+df <- df %>%  filter(dt_hour == 20) %>% select(-c("dt_hour")) %>% 
+  filter(dt_year > 2014) %>% filter(traffic_volume > 1000)
+
+df = df %>% select(-c("weather_description", "date_time", "date_time_c"))
+df$weather_main <- as.factor(df$weather_main)
+df = one_hot(as.data.table(df))
+
+final_data <- df %>% 
+  mutate(date = make_date(dt_year, dt_month, dt_day)) %>% 
+  select(-c("dt_year", "dt_month", "dt_day"))
+
+final_data = final_data %>% 
+  group_by(date) %>% 
+  summarize(
+    holiday=mean(holiday),
+    temp=mean(temp),
+    snow_1h=mean(snow_1h),
+    rain_1h=mean(rain_1h),
+    clouds_all=mean(clouds_all),
+    traffic_volume=mean(traffic_volume),
+    weather_main_Clear=sum(weather_main_Clear),
+    weather_main_Clouds=sum(weather_main_Clouds),
+    weather_main_Drizzle=sum(weather_main_Drizzle),
+    weather_main_Fog=sum(weather_main_Fog),
+    weather_main_Haze=sum(weather_main_Haze),
+    weather_main_Mist=sum(weather_main_Mist),
+    weather_main_Rain=sum(weather_main_Rain),
+    weather_main_Smoke=sum(weather_main_Smoke),
+    weather_main_Snow=sum(weather_main_Snow),
+    weather_main_Thunderstorm=sum(weather_main_Thunderstorm)
+  )
+
+final_data <- final_data %>% select(-c("snow_1h"))
+final_data$t <- year(final_data$date) + yday(final_data$date)/365
+t <- final_data$date
+# final_data$date <- final_data$t - mean(final_data$t)
+```
+
+```{r}
+date_col <- seq.Date(as.Date(t[1]), as.Date(t[length(t)]), by = "day")
+df <- data.frame(matrix(NA, ncol = 17))
+colnames(df) <- colnames(final_data)
+for (d in date_col){
+  temp <- final_data %>% filter(date == d)
+  if(nrow(temp) > 0){
+    df <- rbind(df, temp)
+  }else{
+    temp <- c(d, rep(NA, 16))
+    df <- rbind(df, temp)
+  }
+}
+df <- df[2:nrow(df), ]
+df[, "date"] <- date_col
+final_data <- df
+final_data$t <- year(final_data$date) + yday(final_data$date)/365
+t <- final_data$date
+final_data$date <- final_data$t - mean(final_data$t)
+final_data <- na_kalman(final_data)
+```
+
+```{r, EDA}
+#Correlation
+heatmap(cor(final_data[, 2:16], use = "na.or.complete"))
+
+#Plotting the data
+tsplot(final_data$t, final_data$traffic_volume, ylab = "Traffic Volume", xlab = "Date", gg = T)
+
+#Stationarity
+adf.test(final_data$traffic_volume)
+
+#Numerical Summary
+summary(final_data$traffic_volume)
+```
+
+```{r, PartA}
+step(lm(traffic_volume ~ holiday + temp + rain_1h + clouds_all + 
+               weather_main_Clear + weather_main_Clouds +
+             weather_main_Drizzle + weather_main_Fog + weather_main_Haze +
+               weather_main_Mist + weather_main_Rain + 
+             weather_main_Smoke + weather_main_Snow + 
+               weather_main_Thunderstorm + date, final_data), direction = "backward")
+
+modelA <- lm(traffic_volume ~ holiday + temp + rain_1h + weather_main_Drizzle +
+               weather_main_Fog + weather_main_Mist + weather_main_Rain + 
+               weather_main_Snow + date, final_data)
+summary(modelA)
+print(paste("AIC: ",AIC(modelA)))
+print(paste("BIC: ",BIC(modelA)))
+```
+
+We find that the significant predictors are  holiday, temp, weather_main_Fog, weather_main_Snow, weather_main_Mist, weather_main_Rain, and time. We now begin residual analysis
+
+```{r, ResidualA}
+#Begin residual analysis
+x <- resid(modelA)
+
+#Stationarity Test
+adf.test(x)
+```
+```{r}
+# res <- final_data[, c(6)]
+# res[!is.na(res)] <- x
+# x <- zoo(res, date_col)
+```
+
+```{r}
+#Plot residuals
+tsplot(x, ylab = "Residual",  gg = T)
+acf2(x, main = "Residual", gg = T)
+
+#ACF shows seaonsal persistence so, we try differencing
+tsplot(diff(x, 7), ylab = "Seasonal Differenced Residual", gg = T)
+acf2(diff(x, 7), main = "Seasonal Differenced Residual", gg = T)
+```
+
+```{r, ResModelA}
+#ACF cuts off, PACF tails off, for seasonal 
+#So MA(1) models are chosen for seasonal.
+#PACF cuts off, ACF tails off, for non seasonal 
+#So AR(1) models are chosen for non seasonal.
+#ARIMA(1,0,0)X(0,1,1)_s=7
+sarima(x, 1,0,0,0,1,1,7)
+sarima(x, 0,0,1,0,1,1,7)
+sarima(x, 1,0,1,0,1,1,7)
+sarima(x, 1,0,2,0,1,1,7)
+sarima(x, 2,0,1,0,1,1,7)
+sarima(x, 2,0,2,0,1,1,7)
+```
+
+Residual analysis shows that residual can be modeled as ARIMA$(1,0,0)\times(0,1,1)_7$.
+
+```{r, FinalModelA}
+sarima(final_data$traffic_volume, 1,0,2,0,1,1,7, xreg = final_data[, c(1,2,3,4,9,10,12,13,15)], gg = T)
+```
+
+# Part B
+
+The same data is chosen for Part B.
+
+```{r}
+#Plotting the data
+tsplot(final_data$traffic_volume, ylab = "Traffic Volume", xlab = "Date", gg = T)
+```
+
+```{r}
+#Stationarity Check
+adf.test(final_data$traffic_volume)
+```
+
+```{r}
+#ACF and PACF
+acf2(final_data$traffic_volume,  main = "Traffic Volume", gg = T)
+```
+
+```{r}
+#Seasonal Persistence is present, so we try differencing
+y <- diff(final_data$traffic_volume, 7)
+tsplot(y, ylab = "Seasonal Differenced Traffic Volume", xlab = "Date", gg = T)
+```
+
+```{r}
+acf2(y, main = "Seasonal Differenced Traffic Volume", gg = T)
+```
+
+```{r}
+sarima(final_data$traffic_volume, 1,0,0,0,1,1,7, gg = T)
+sarima(final_data$traffic_volume, 0,0,1,0,1,1,7, gg = T)
+sarima(final_data$traffic_volume, 1,0,1,0,1,1,7, gg = T)
+sarima(final_data$traffic_volume, 2,0,1,0,1,1,7, gg = T)
+sarima(final_data$traffic_volume, 1,0,2,0,1,1,7, gg = T)
+sarima(final_data$traffic_volume, 2,0,2,0,1,1,7, gg = T)
+```
+
+```{r}
+sarima(final_data$traffic_volume, 2,0,1,0,1,1,7, gg = T)
+```
+
+```{r}
+sarima.for(final_data$traffic_volume, 5,2,0,1,0,1,1,7, gg = T)
+```
+
+# Part C
+
+
+```{r}
+sp <- spec.pgram(final_data$traffic_volume,taper=0,log="no")
+```
+
+```{r}
+sort_specs <- sort(sp$spec, decreasing = TRUE)[c(1,2,3)]
+```
+
+```{r}
+p1 <- sp$freq[sp$spec==sort_specs[1]]
+p1
+```
+
+```{r}
+p2 <- sp$freq[sp$spec==sort_specs[2]]
+p2
+```
+
+```{r}
+p3 <- sp$freq[sp$spec==sort_specs[3]]
+p3
+```
+
+```{r}
+1/p1
+```
+
+```{r}
+1/p2
+```
+
+```{r}
+1/p3
+```
+
+```{r}
+make_CI <- function(peak_spec){
+  u <- qchisq(0.025,2)
+  l <- qchisq(0.975,2)
+  c((2*peak_spec)/l,(2*peak_spec)/u)  
+}
+```
+
+```{r}
+make_CI(sort_specs[1])
+```
+
+```{r}
+make_CI(sort_specs[2])
+```
+
+```{r}
+make_CI(sort_specs[3])
+```
+
+
+```{r}
+#del<-0.1 # sampling interval
+x.spec <- spectrum(final_data$traffic_volume,log="no",span=5, plot=F)
+
+spx <- x.spec$freq
+spy <- 2*x.spec$spec
+plot(spy~spx,xlab="frequency",ylab="spectral density",type="l", main = "Smoothed Periodogram")
+abline(v=x.spec$freq[3], lty=2)
+abline(v=x.spec$freq[174], lty=2)
+```
+
+```{r}
+mvspec(final_data$traffic_volume, log="no", main = "Raw Periodogram")
+
+tyt.per <- mvspec(final_data$traffic_volume, kernel('daniell', 2), log="no", main = "Smoothed Periodogram")
+abline(v=tyt.per$freq[3], lty=2)
+abline(v=tyt.per$freq[174], lty=2)
+
+1/tyt.per$freq[3]
+1/tyt.per$freq[174]
+
+tyt.per$bandwidth
+
+df = tyt.per$df
+U = qchisq(.025, df)
+L = qchisq(.975, df)
+
+tyt.per$spec[3]
+tyt.per$spec[174]
+
+df*tyt.per$spec[174]/L
+df*tyt.per$spec[174]/U
+
+df*tyt.per$spec[3]/L
+df*tyt.per$spec[3]/U
+```
+
+```{r}
+fit <- nnetar(final_data$traffic_volume, lambda=0)
+autoplot(forecast(fit,h=30))
+```
